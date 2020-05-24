@@ -1,0 +1,115 @@
+---
+layout: post
+title: "从零开始之自制神经网络框架-001"
+date: 2020-05-24 11:18:00 -0500
+categories: jekyll update
+---
+
+有段时间没有碰过C++，再加上又开始做一些ML相关的工作了，于是就动了这个心思，想要通过写一个神经网络框架来练练手。
+
+这不是我第一次动这个心思，早在三年前，在做Deep
+Learning课的lab的时候我就心血来潮，用C++写了一个[简单的Neural Network框架](https://github.com/henryly94/yynn). 那时候对于C++和神经网络的了解都还是非常初级（当然现在也是如此），所以写出来的东西也就只能搏人一笑。当时我非常得意的地方是那个破烂的框架还是可以用来训练课程里用到的简单网络和数据的，但是现在看来主要存在几个问题:
+- 可扩展性差
+  - 因为之前学到的神经网络都只是简单的调包，所以实现的时候缺乏对于底层结构和用法的深入思考，更不会去想什么Autograd什么简洁优雅，几个Matrix运算干到底。
+- C++代码质量差
+  - 由于当时入门学的是Python，平时用的比较多的也是Python，所以对于C++语言层面的理解确实也比较差，可以说是非常蹩脚的*C with class*了。
+- 工程结构差
+  - 这点只要看一眼源码的文件夹就可以知道了，虽说部分原因在于代码量小，没有很明显的层级结构，但是当时的我连makefile都不会写，真要用起来还得手动去添加依赖到自己的工程里，显而易见的麻烦且不优雅。
+
+开始工作之后写了不少C++，也**被迫**学习了很多规范和语言特性，希望能在这次重新捡起私活的过程中好好的复习一下。也算是疫情期间避免自己总是沉迷召唤师峡谷的一种distraction吧（笑。
+
+闲话不多说，虽然说是从零开始，但是我会参考很多PyTorch设计的思想，因为我觉得Pytorch实在是用起来太舒服了（然而上班只能用TensorFlow）。
+
+作为一个神经网络的框架，首先要实现的当然就是我们的大明星:
+Tensor啦。简单点说就是一个维度任意每个维度尺寸任意最好还能接受任意Scalar Type的数组啦。最开始我一直纠结于这个Shape到底应该作为模板参数还是类成员变量。就我个人的体验来说，虽然经典的Multi-dimensional Array都是把尺寸放在参数里，这样在编译的时候就能决定好，提高效率，但是考虑到我们的Use case并不会需要经常使用类似的操作:
+{% highlight cpp %}
+// Random access.
+tensor[i][j][k] = 1.234;
+
+// Get slice.
+auto slice = tensor[i][j];
+{% endhighlight %}
+
+所以最后我决定一切从简，模板参数里只放一个Type,表示这到底是一个Int的Tensor还是一个Float的Tensor。Tensor的定义如下：
+{% highlight cpp %}
+template <typename Type>
+class Tensor {
+  TensorShape shape_;
+  Type* data_;
+};
+{% endhighlight %}
+
+可以看到Tensor其实就只是一个Type\*指针，然后我们在调用构造函数的时候需要传一个TensorShape，来表明到底这个Tensor长啥样，真的是非常简单省事了，TensorShape的定义和我们的Ctor如下：
+{% highlight cpp %}
+struct TensorShape {
+  TensorShape(std::initializer_list<size_t> dims)
+      : dim(dims.size()),
+        dims(dims),
+        total(std::accumulate(dims.begin(), dims.end(), 1,
+                              std::multiplies<size_t>())) {}
+  size_t dim;
+  size_t total;
+  std::vector<size_t> dims;
+};
+
+Tensor::Tensor(TensorShape shape) : shape_(shape), data_(new Type[shape.total]{0}) {}
+{% endhighlight %}
+
+有了Tensor，接下来是不是就要定义在Tensor上的运算了呢？别急，目前的Tensor只是简单的数据存储，说白了就是个Data Storage，我们要拿来作神经网络的Infrastructure这点东西阿还是不够的。因为我们不光是要计算两个Tensor加减乘除后的值，也就是神经网络里的Forward，我们还想要让这个操作最后能求导数来更新参数，也就是Backward。为了支持这一点我们定义了一个更大一点的数据类型叫做Variable:
+{% highlight cpp %}
+template <typename Type>
+class Variable {
+ public:
+  Tensor<Type> values_;
+  Tensor<Type> grads_;
+  Autograd<Type> autograd_;
+};
+{% endhighlight %}
+
+可以看到的是Variable包含了两个Tensor，一个储存值，一个储存可能的导数，以方便我们后续更新值。还有一个Autograd在这里是为了我们能够方便的根据运算来得到对应的导数，这种架构也是Pytorch所采用的，Autograd的定义如下：
+{% highlight cpp %}
+template <typename Type>
+using BackwardFunction = std::function<void()>;
+
+template <typename Type>
+struct Autograd {
+  Autograd(std::vector<Autograd*> next, Variable<Type>* variable_ptr,
+           BackwardFunction<Type> backward_fn)
+      : next(next), variable_ptr(variable_ptr), backward_fn(backward_fn) {}
+  std::vector<Autograd*> next;
+  Variable<Type>* variable_ptr;
+  BackwardFunction<Type> backward_fn;
+};
+{% endhighlight %}
+
+乍一看好像乱七八糟不知道在干什么，其实如果我们弄清楚Autograd具体是在干什么就很容易看懂了。我们先来想象一下我们在计算Back propagation，如果我们没有花里胡哨的功能，只有两个Tensor和一个操作（比方说一个不带Bias的全连接层），然后假设我们Somehow得到了这个Loss对于这个结果的偏导数（比方说就是结果本身）：
+```
+Result = TensorA.dot(TensorB)
+Loss = Result ** 2 / 2
+
+# Grad_Result = Result
+```
+
+那么很自然的，我们根据链式求导法则，会有
+```
+Grad_TensorA = Grad_Result.dot(TensorB.T)
+Grad_TensorB = Grad_Result.dot(TensorA.T)
+```
+
+多么简单！这是因为我们只是在对一个二元操作符求导，只关注局部，加减乘除都是非常单纯的操作。但是如果有很多层，很多个操作，那么我们就需要重复这样的工作很多次，而且还需要小心翼翼的控制我们计算的顺序。你可以发现我们在计算Grad_TensorA和Grad_TensorB的时候，都用到了Grad_Result。Back propagation的基本原理就是导数是从后向前传播的。你可以想象需要写这么多行代码还得考虑清楚顺序是一件多么麻烦的事情。
+
+Autograd是怎么Make our life
+easier的呢？首先注意到，我们如果把神经网络里的Tensor当成是节点，把那些操作当成是边的话，那么我们整个网络就是一棵树！根结点就是最后得到的Loss！（当然这不是完全正确阿，准确的来说应该是一个有向无环图（Directed Acyclic Graph），但是目前为了方便我们可以把他看成是一棵树）。
+
+那么既然我们知道了这是一棵树，那么很显然我们就有了逻辑上的顺序，也就是从根结点一直往下遍历整棵树。首先为了这么做，我们需要建立这么一棵树，如何建立呢？这就是Autograd发挥威力的地方了。我们观察一下Autograd的结构：
+{% highlight cpp %}
+Variable<Type>* variable_ptr;
+std::vector<Autograd*> next;
+BackwardFunction<Type> backward_fn;
+{% endhighlight %}
+
+这里的variable_ptr指向这个Autograd对应的Variable，表明当前节点，而next则存了所有的子节点的Autograd对象，用来在遍历的时候使用。而backward_fn则是当前节点的Backward操作，对于刚才的例子来说，就是计算
+```
+Grad_TensorA = Grad_Result.dot(TensorB.T)
+```
+有了这些，我们就能够从最终的Loss开始，用最简单的层次遍历的算法，去自动的一层一层算出每个节点的导数了。

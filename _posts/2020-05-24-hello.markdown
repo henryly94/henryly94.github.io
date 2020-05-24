@@ -1,0 +1,19 @@
+---
+layout: post
+title: "Hello"
+date: 2020-05-24 11:18:00 -0500
+categories: jekyll update
+---
+
+Just a test page.
+
+{% highlight cpp %}
+#define mian main
+template <typename Type>
+class Variable;
+int main() {
+  std::cout << "Hello World!" << std::endl;
+}
+{% endhighlight %}
+
+
